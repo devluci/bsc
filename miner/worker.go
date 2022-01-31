@@ -171,6 +171,7 @@ type worker struct {
 
 	snapshotMu    sync.RWMutex // The lock used to protect the block snapshot and state snapshot
 	snapshotBlock *types.Block
+	snapshotReceipts types.Receipts
 	snapshotState *state.StateDB
 
 	// atomic status counters
@@ -289,6 +290,14 @@ func (w *worker) pendingBlock() *types.Block {
 	w.snapshotMu.RLock()
 	defer w.snapshotMu.RUnlock()
 	return w.snapshotBlock
+}
+
+// pendingBlockAndReceipts returns pending block and corresponding receipts.
+func (w *worker) pendingBlockAndReceipts() (*types.Block, types.Receipts) {
+	// return a snapshot to avoid contention on currentMu mutex
+	w.snapshotMu.RLock()
+	defer w.snapshotMu.RUnlock()
+	return w.snapshotBlock, w.snapshotReceipts
 }
 
 // start sets the running status as 1 and triggers new work submitting.
@@ -515,7 +524,7 @@ func (w *worker) mainLoop() {
 				// Only update the snapshot if any new transactons were added
 				// to the pending block
 				if tcount != w.current.tcount {
-					w.updateSnapshot()
+					w.updateSnapshot(nil, nil)
 				}
 			} else {
 				// Special case, if the consensus engine is 0 period clique(dev mode),
@@ -706,7 +715,7 @@ func (w *worker) commitUncle(env *environment, uncle *types.Header) error {
 
 // updateSnapshot updates pending snapshot block and state.
 // Note this function assumes the current variable is thread safe.
-func (w *worker) updateSnapshot() {
+func (w *worker) updateSnapshot(block *types.Block, receipts []*types.Receipt) {
 	w.snapshotMu.Lock()
 	defer w.snapshotMu.Unlock()
 
@@ -727,14 +736,30 @@ func (w *worker) updateSnapshot() {
 		return false
 	})
 
-	w.snapshotBlock = types.NewBlock(
-		w.current.header,
-		w.current.txs,
-		uncles,
-		w.current.receipts,
-		trie.NewStackTrie(nil),
-	)
+	if receipts == nil {
+	    receipts = w.current.receipts
+	}
+	if block == nil {
+        block = types.NewBlock(
+            w.current.header,
+            w.current.txs,
+            uncles,
+            receipts,
+            trie.NewStackTrie(nil),
+        )
+	}
+	w.snapshotBlock = block
+	w.snapshotReceipts = copyReceipts(receipts)
 	w.snapshotState = w.current.state.Copy()
+}
+
+func copyReceipts(receipts []*types.Receipt) []*types.Receipt {
+	result := make([]*types.Receipt, len(receipts))
+	for i, l := range receipts {
+		cpy := *l
+		result[i] = &cpy
+	}
+	return result
 }
 
 func (w *worker) commitTransaction(tx *types.Transaction, coinbase common.Address, receiptProcessors ...core.ReceiptProcessor) ([]*types.Log, error) {
@@ -975,12 +1000,14 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 		}
 		if len(localTxs) > 0 {
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, localTxs)
+    		log.Info("commitTransactions", "pending", len(pending), "localTxs", len(localTxs))
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
 				return
 			}
 		}
 		if len(remoteTxs) > 0 {
 			txs := types.NewTransactionsByPriceAndNonce(w.current.signer, remoteTxs)
+    		log.Info("commitTransactions", "pending", len(pending), "remoteTxs", len(remoteTxs))
 			if w.commitTransactions(txs, w.coinbase, interrupt) {
 				return
 			}
@@ -988,7 +1015,7 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 		commitTxsTimer.UpdateSince(start)
 		log.Info("Gas pool", "height", header.Number.String(), "pool", w.current.gasPool.String())
 	}
-	w.commit(uncles, w.fullTaskHook, false, tstart)
+	w.commit(uncles, w.fullTaskHook, true, tstart)
 }
 
 // commit runs any post-transaction state modifications, assembles the final block
@@ -1020,7 +1047,7 @@ func (w *worker) commit(uncles []*types.Header, interval func(), update bool, st
 		}
 	}
 	if update {
-		w.updateSnapshot()
+		w.updateSnapshot(block, receipts)
 	}
 	return nil
 }

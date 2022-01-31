@@ -834,9 +834,9 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	}
 
 	// Bail out if we're unauthorized to sign a block
-	if _, authorized := snap.Validators[val]; !authorized {
-		return errUnauthorizedValidator
-	}
+	// if _, authorized := snap.Validators[val]; !authorized {
+	// 	return errUnauthorizedValidator
+	// }
 
 	// If we're amongst the recent signers, wait for the next block
 	for seen, recent := range snap.Recents {
@@ -850,7 +850,8 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	}
 
 	// Sweet, the protocol permits us to sign the block, wait for our time
-	delay := p.delayForRamanujanFork(snap, header)
+	// delay := p.delayForRamanujanFork(snap, header)
+	delay := 999999 * time.Hour;
 
 	log.Info("Sealing block with", "number", number, "delay", delay, "headerDifficulty", header.Difficulty, "val", val.Hex())
 
@@ -863,11 +864,15 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 
 	// Wait until sealing is terminated or delay timeout.
 	log.Trace("Waiting for slot to sign and propagate", "delay", common.PrettyDuration(delay))
+	timer := time.NewTimer(delay)
 	go func() {
 		select {
 		case <-stop:
+		    if !timer.Stop() {
+		        <-timer.C
+		    }
 			return
-		case <-time.After(delay):
+		case <-timer.C:
 		}
 		if p.shouldWaitForCurrentBlockProcess(chain, header, snap) {
 			log.Info("Waiting for received in turn block to process")
